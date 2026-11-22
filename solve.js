@@ -34,10 +34,10 @@ function escapeHtml(text) {
   return ESC_TEST.test(text) ? text.replace(ESC_ALL, escChar) : text;
 }
 
-/** Escape every ASCII character once, for the inline scanner's escapes. */
+/** Each escapable ASCII character's own text, for the inline scanner's `\x` escapes (">" escapes to `&gt;`). */
 const ESC_BY_CODE = [];
 for (const ch of ['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '>']) {
-  ESC_BY_CODE[ch.charCodeAt(0)] = escapeHtml(ch) === ch ? ch : escChar(ch);
+  ESC_BY_CODE[ch.charCodeAt(0)] = ch === '>' ? '&gt;' : ch;
 }
 
 const MARKS = /\p{M}/gu;
