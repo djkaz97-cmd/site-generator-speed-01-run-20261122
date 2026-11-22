@@ -1,0 +1,10 @@
+# build outputs and scratch, never part of the entry
+out/
+out2/
+tmp/
+*.tar.gz
+
+# benchmarks and profiles
+bench*.mjs
+prof*/
+*.cpuprofile
