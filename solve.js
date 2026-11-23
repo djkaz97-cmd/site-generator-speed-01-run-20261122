@@ -159,6 +159,7 @@ const QUOTED_CLOSED = 'a quoted string is not closed';
 function stringOf(raw) {
   if (raw.charCodeAt(0) === 34) {
     if (raw.length < 2 || raw.charCodeAt(raw.length - 1) !== 34) return { error: QUOTED_CLOSED };
+    if (raw.indexOf('\\', 1) === -1 && raw.indexOf('"', 1) === raw.length - 1) return { value: raw.slice(1, -1) };
     let out = '';
     for (let i = 1; i < raw.length - 1; i++) {
       const c = raw.charCodeAt(i);
@@ -692,7 +693,12 @@ class TemplateError extends Error {}
 
 function pathOf(name, text) {
   if (!PATH_RE.test(text)) throw new TemplateError(`template "${name}": ${JSON.stringify(text)} is not a path`);
-  return text.split('.');
+  const path = text.split('.');
+  path.safe = true;
+  for (const key of path) {
+    if (key in Object.prototype || key in Array.prototype) { path.safe = false; break; }
+  }
+  return path;
 }
 
 /** `src`'s tokens: text, {{ }}, {{{ }}} and {% %}, a standalone tag's line taken with it. */
@@ -784,9 +790,20 @@ function parseTemplate(name, src) {
 function lookup(scope, path) {
   let s = scope;
   const first = path[0];
+  let v;
+  if (path.safe) {
+    while (s !== null && (v = s.vars[first]) === undefined) s = s.parent;
+    if (s === null) return undefined;
+    for (let k = 1; k < path.length; k++) {
+      if (v === null || typeof v !== 'object') return undefined;
+      v = v[path[k]];
+      if (v === undefined) return undefined;
+    }
+    return v;
+  }
   while (s !== null && !Object.hasOwn(s.vars, first)) s = s.parent;
   if (s === null) return undefined;
-  let v = s.vars[first];
+  v = s.vars[first];
   for (let k = 1; k < path.length; k++) {
     if (v === null || typeof v !== 'object' || !Object.hasOwn(v, path[k])) return undefined;
     v = v[path[k]];
@@ -837,10 +854,15 @@ function renderInto(nodes, scope, ctx, depth, elem, out) {
         const xs = lookup(scope, n.path);
         if (Array.isArray(xs)) {
           const len = xs.length;
+          const vars = { [n.name]: undefined, loop: { index: 1, first: false, last: false, length: len } };
+          const inner = { vars, parent: scope };
           for (let j = 0; j < len; j++) {
             const x = xs[j];
-            const vars = { [n.name]: x, loop: { index: j + 1, first: j === 0, last: j === len - 1, length: len } };
-            renderInto(n.body, { vars, parent: scope }, ctx, depth, x, out);
+            vars[n.name] = x;
+            vars.loop.index = j + 1;
+            vars.loop.first = j === 0;
+            vars.loop.last = j === len - 1;
+            renderInto(n.body, inner, ctx, depth, x, out);
           }
         }
         break;

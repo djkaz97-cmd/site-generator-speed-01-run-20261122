@@ -17,13 +17,12 @@ import { setFlagsFromString } from 'node:v8';
 function tuneEngine() {
   setFlagsFromString('--no-incremental-marking');
   if (Number(process.versions.v8.split('.')[0]) >= 12) {
-    setFlagsFromString('--no-turbofan');
-    setFlagsFromString('--max-semi-space-size=32');
+    setFlagsFromString('--no-turbofan --max-semi-space-size=32');
   }
 }
 tuneEngine();
 
-const { run } = await import(new URL('./solve.js', import.meta.url).href);
+const { run } = await import('./solve.js');
 
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
