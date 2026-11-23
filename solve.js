@@ -359,8 +359,7 @@ function inline(src, env) {
   let i = 0;
   while (i < n) {
     SPECIAL_RE.lastIndex = i;
-    const found = SPECIAL_RE.exec(src);
-    const j = found === null ? n : found.index;
+    const j = SPECIAL_RE.test(src) ? SPECIAL_RE.lastIndex - 1 : n;
     if (j >= n) {
       if (plain === 0) return src;
       out += src.slice(plain);
@@ -811,22 +810,27 @@ function truthy(v) {
 }
 
 /** `nodes` rendered into `out` in `scope` ({ vars, parent }). `ctx` holds the parsed templates and the root-only cache. */
-function renderInto(nodes, scope, ctx, depth, inLoop, out) {
+function renderInto(nodes, scope, ctx, depth, elem, out) {
   for (let k = 0; k < nodes.length; k++) {
     const n = nodes[k];
     switch (n.kind) {
       case 'text':
         out.push(n.text);
         break;
-      case 'var':
-        out.push(escapeHtml(textOf(lookup(scope, n.path))));
+      case 'var': {
+        const v = lookup(scope, n.path);
+        if (typeof v === 'string') out.push(ESC_TEST.test(v) ? v.replace(ESC_ALL, escChar) : v);
+        else out.push(escapeHtml(textOf(v)));
         break;
-      case 'raw':
-        out.push(textOf(lookup(scope, n.path)));
+      }
+      case 'raw': {
+        const v = lookup(scope, n.path);
+        out.push(typeof v === 'string' ? v : textOf(v));
         break;
+      }
       case 'if': {
         const branch = (truthy(lookup(scope, n.path)) !== n.not) ? n.then : n.else;
-        if (branch !== null) renderInto(branch, scope, ctx, depth, inLoop, out);
+        if (branch !== null) renderInto(branch, scope, ctx, depth, elem, out);
         break;
       }
       case 'for': {
@@ -834,8 +838,9 @@ function renderInto(nodes, scope, ctx, depth, inLoop, out) {
         if (Array.isArray(xs)) {
           const len = xs.length;
           for (let j = 0; j < len; j++) {
-            const vars = { [n.name]: xs[j], loop: { index: j + 1, first: j === 0, last: j === len - 1, length: len } };
-            renderInto(n.body, { vars, parent: scope }, ctx, depth, true, out);
+            const x = xs[j];
+            const vars = { [n.name]: x, loop: { index: j + 1, first: j === 0, last: j === len - 1, length: len } };
+            renderInto(n.body, { vars, parent: scope }, ctx, depth, x, out);
           }
         }
         break;
@@ -843,18 +848,19 @@ function renderInto(nodes, scope, ctx, depth, inLoop, out) {
       case 'include': {
         const t = ctx.templates.get(n.name);
         if (t !== undefined && depth < INCLUDE_DEPTH) {
-          if (!inLoop && ctx.rootOnly.has(n.name)) {
-            // Only site, tags and recent are read, and no loop shadows them: one render serves every page.
-            const key = `${n.name}|${depth}`;
-            let cached = ctx.rootCache.get(key);
+          const cache = n.cache;
+          if (cache !== null && (cache === 1 ? elem === undefined : elem !== undefined)) {
+            const key = cache === 1 ? `${n.name}|${depth}` : elem;
+            const store = cache === 1 ? ctx.rootCache : n.byElem;
+            let cached = store.get(key);
             if (cached === undefined) {
               const sub = [];
-              renderInto(t, scope, ctx, depth + 1, false, sub);
+              renderInto(t, scope, ctx, depth + 1, cache === 2 ? elem : undefined, sub);
               cached = sub.join('');
-              ctx.rootCache.set(key, cached);
+              store.set(key, cached);
             }
             out.push(cached);
-          } else renderInto(t, scope, ctx, depth + 1, inLoop, out);
+          } else renderInto(t, scope, ctx, depth + 1, elem, out);
         }
         break;
       }
@@ -883,6 +889,7 @@ function analyseNodes(nodes, bound, free, includes) {
         if (!bound.has(n.path[0])) free.add(n.path[0]);
         const inner = new Set(bound);
         inner.add(n.name);
+        inner.add('loop');
         analyseNodes(n.body, inner, free, includes);
         break;
       }
@@ -893,8 +900,8 @@ function analyseNodes(nodes, bound, free, includes) {
   }
 }
 
-/** The templates whose output depends on `site`, `tags` and `recent` alone (and on nothing a loop can shadow). */
-function rootOnlyTemplates(templates) {
+/** The names a template reads that no scope of its own binds, closed over the templates it includes. */
+function freeNamesOf(templates) {
   const infos = new Map();
   for (const [name, nodes] of templates) {
     const free = new Set();
@@ -918,17 +925,48 @@ function rootOnlyTemplates(templates) {
       }
     }
   }
-  const out = new Set();
-  for (const [name, info] of infos) {
-    let rootOnly = true;
-    for (const n of info.free) {
-      if (n !== 'site' && n !== 'tags' && n !== 'recent') {
-        rootOnly = false;
-        break;
+  return infos;
+}
+
+/** Whether `free` holds nothing but `allowed`. */
+function onlyNames(free, a, b, c) {
+  for (const n of free) {
+    if (n !== a && n !== b && n !== c) return false;
+  }
+  return true;
+}
+
+/**
+ * Mark every include that can be rendered once and reused: one that reads only site, tags and recent, or
+ * (inside a loop) only the loop's own element.
+ */
+function annotateIncludes(nodes, infos, inner) {
+  for (const n of nodes) {
+    if (n.kind === 'if') {
+      annotateIncludes(n.then, infos, inner);
+      if (n.else !== null) annotateIncludes(n.else, infos, inner);
+    } else if (n.kind === 'for') {
+      annotateIncludes(n.body, infos, n.name);
+    } else if (n.kind === 'include') {
+      const target = infos.get(n.name);
+      n.cache = null;
+      n.byElem = null;
+      if (target === undefined) continue;
+      if (onlyNames(target.free, 'site', 'tags', 'recent')) n.cache = 1;
+      else if (inner !== null && onlyNames(target.free, inner, inner, inner)) {
+        n.cache = 2;
+        n.byElem = new Map();
       }
     }
-    if (rootOnly) out.add(name);
   }
+}
+
+/** Which templates depend on `site`, `tags` and `recent` alone (and on nothing a loop can shadow). */
+function rootOnlyTemplates(templates) {
+  const infos = freeNamesOf(templates);
+  const out = new Set();
+  for (const [name, info] of infos) if (onlyNames(info.free, 'site', 'tags', 'recent')) out.add(name);
+  for (const [, nodes] of templates) annotateIncludes(nodes, infos, null);
   return out;
 }
 
@@ -1117,18 +1155,25 @@ export function run(input) {
   const recent = posts.slice(0, input.site.recent).map((p) => cardOfCache.get(p));
   const ctx = { templates, rootOnly: rootOnlyTemplates(templates), rootCache: new Map() };
 
-  const render = (name, vars) => {
-    const nodes = templates.get(name);
-    if (nodes === undefined) return null;
+  const render = (nodes, vars) => {
     const out = [];
-    renderInto(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0, false, out);
+    renderInto(nodes, { vars, parent: null }, ctx, 0, undefined, out);
     return out.join('');
   };
 
   for (const s of sources) {
+    const nodes = templates.get(s.layout);
+    if (nodes === undefined) continue;
     const card = cardOfCache.get(s) ?? cardOf(s);
     const page = {
-      ...card,
+      title: card.title,
+      url: card.url,
+      date: card.date,
+      date_long: card.date_long,
+      summary: card.summary,
+      excerpt: card.excerpt,
+      reading_minutes: card.reading_minutes,
+      tags: card.tags,
       slug: s.slug,
       content: s.html,
       toc: s.toc,
@@ -1136,34 +1181,44 @@ export function run(input) {
       older: linkOf(s.older ?? null),
       is_post: s.post,
     };
-    output[`${s.outDir}/index.html`] = render(s.layout, { page });
+    output[`${s.outDir}/index.html`] = render(nodes, { site, tags: allTags, recent, page });
   }
 
   const per = input.site.per_page;
   const pages = Math.max(1, Math.ceil(posts.length / per));
   const indexUrl = (k) => (k === 1 ? `${base}/` : `${base}/page/${k}/`);
-  for (let k = 1; k <= pages; k++) {
-    const html = render('index', {
-      posts: posts.slice((k - 1) * per, k * per).map((p) => cardOfCache.get(p)),
-      pager: {
-        number: k,
-        total: pages,
-        url: indexUrl(k),
-        newer_url: k === 1 ? '' : indexUrl(k - 1),
-        older_url: k === pages ? '' : indexUrl(k + 1),
-      },
-    });
-    if (html !== null) output[k === 1 ? 'index.html' : `page/${k}/index.html`] = html;
+  const indexNodes = templates.get('index');
+  if (indexNodes !== undefined) {
+    for (let k = 1; k <= pages; k++) {
+      output[k === 1 ? 'index.html' : `page/${k}/index.html`] = render(indexNodes, {
+        site,
+        tags: allTags,
+        recent,
+        posts: posts.slice((k - 1) * per, k * per).map((p) => cardOfCache.get(p)),
+        pager: {
+          number: k,
+          total: pages,
+          url: indexUrl(k),
+          newer_url: k === 1 ? '' : indexUrl(k - 1),
+          older_url: k === pages ? '' : indexUrl(k + 1),
+        },
+      });
+    }
   }
 
-  for (const t of tags) {
-    const html = render('tag', {
-      tag: { name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => cardOfCache.get(p)) },
-    });
-    if (html !== null) output[`tags/${t.slug}/index.html`] = html;
+  const tagNodes = templates.get('tag');
+  if (tagNodes !== undefined) {
+    for (const t of tags) {
+      output[`tags/${t.slug}/index.html`] = render(tagNodes, {
+        site,
+        tags: allTags,
+        recent,
+        tag: { name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => cardOfCache.get(p)) },
+      });
+    }
   }
-  const tagsHtml = render('tags', {});
-  if (tagsHtml !== null) output['tags/index.html'] = tagsHtml;
+  const tagsNodes = templates.get('tags');
+  if (tagsNodes !== undefined) output['tags/index.html'] = render(tagsNodes, { site, tags: allTags, recent });
 
   for (const f of statics) {
     if (Object.hasOwn(output, f.path)) report.push(`shadowed ${f.path}: a built page has its path`);
