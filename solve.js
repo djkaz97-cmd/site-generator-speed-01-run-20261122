@@ -1053,33 +1053,11 @@ export function run(input) {
   const staticPaths = new Set();
   for (const f of statics) staticPaths.add(f.path);
   const broken = new Set();
+  const linkEnv = { dir: '', path: '', bySource, staticPaths, base, broken, link(target) { return resolveLink(this, target); } };
   for (const s of sources) {
-    const dir = s.srcDir;
-    const env = {
-      link: (target) => {
-        const c = target.charCodeAt(0);
-        if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
-          for (let k = 1; k < target.length; k++) {
-            const d = target.charCodeAt(k);
-            if (d === 58) {
-              if (k > 0) return target;
-              break;
-            }
-            if (!((d >= 65 && d <= 90) || (d >= 97 && d <= 122) || (d >= 48 && d <= 57) || d === 43 || d === 45 || d === 46)) break;
-          }
-        }
-        if (c === 47 || c === 35) return target;
-        const hash = target.indexOf('#');
-        const rel = hash === -1 ? target : target.slice(0, hash);
-        const frag = hash === -1 ? '' : target.slice(hash);
-        const path = rel === '' ? null : resolvePath(dir, rel);
-        if (path !== null && bySource.has(path)) return `${bySource.get(path).url}${frag}`;
-        if (path !== null && staticPaths.has(path)) return `${base}/${path}${frag}`;
-        broken.add(`broken-link ${s.path} -> ${target}`);
-        return target;
-      },
-    };
-    const md = renderMarkdown(s.body, env);
+    linkEnv.dir = s.srcDir;
+    linkEnv.path = s.path;
+    const md = renderMarkdown(s.body, linkEnv);
     s.html = md.html;
     s.toc = md.toc;
     s.excerpt = md.excerpt;
@@ -1232,6 +1210,30 @@ export function run(input) {
   output[REPORT_FILE] = `${lines.join('\n')}\n`;
 
   return output;
+}
+
+/** A link's href: a scheme or a leading / keep it, anything else resolves against the source's own directory. */
+function resolveLink(env, target) {
+  const c = target.charCodeAt(0);
+  if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+    for (let k = 1; k < target.length; k++) {
+      const d = target.charCodeAt(k);
+      if (d === 58) return target;
+      if (!((d >= 65 && d <= 90) || (d >= 97 && d <= 122) || (d >= 48 && d <= 57) || d === 43 || d === 45 || d === 46)) break;
+    }
+  }
+  if (c === 47 || c === 35) return target;
+  const hash = target.indexOf('#');
+  const rel = hash === -1 ? target : target.slice(0, hash);
+  const frag = hash === -1 ? '' : target.slice(hash);
+  const path = rel === '' ? null : resolvePath(env.dir, rel);
+  if (path !== null) {
+    const src = env.bySource.get(path);
+    if (src !== undefined) return src.url + frag;
+    if (env.staticPaths.has(path)) return `${env.base}/${path}${frag}`;
+  }
+  env.broken.add(`broken-link ${env.path} -> ${target}`);
+  return target;
 }
 
 /** `rel` (a link's path) from the directory `dir`, or null when it climbs out of the root. */
